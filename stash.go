@@ -19,6 +19,13 @@ type Cache[K comparable, V any] struct {
 	loading sync.Map // K -> *loadCall[V]
 }
 
+// result is used to return values from locked sections without heap allocation.
+type result[V any] struct {
+	value   V
+	ok      bool
+	expired bool
+}
+
 type loadCall[V any] struct {
 	done  chan struct{}
 	value V
@@ -44,11 +51,21 @@ func New[K comparable, V any](opts ...Option[K, V]) *Cache[K, V] {
 // Returns the value and true if found, zero value and false otherwise.
 func (c *Cache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 	c.mu.Lock()
-	v, ok := c.get(key)
+	r := c.get(key)
 	c.mu.Unlock()
 
-	if ok {
-		return v, true, nil
+	// update stats outside lock
+	if r.ok {
+		c.stats.hit()
+		if c.cfg.onHit != nil {
+			c.cfg.onHit(key, r.value)
+		}
+		return r.value, true, nil
+	}
+
+	c.stats.miss()
+	if c.cfg.onMiss != nil {
+		c.cfg.onMiss(key)
 	}
 
 	if c.cfg.store == nil {
@@ -77,15 +94,29 @@ func (c *Cache[K, V]) GetMany(ctx context.Context, keys []K) (found map[K]V, mis
 	found = make(map[K]V, len(keys))
 	missing = make([]K, 0)
 
+	var hits, misses int64
 	c.mu.Lock()
 	for _, key := range keys {
-		if v, ok := c.get(key); ok {
-			found[key] = v
+		r := c.get(key)
+		if r.ok {
+			found[key] = r.value
+			hits++
+			if c.cfg.onHit != nil {
+				c.cfg.onHit(key, r.value)
+			}
 		} else {
 			missing = append(missing, key)
+			misses++
+			if c.cfg.onMiss != nil {
+				c.cfg.onMiss(key)
+			}
 		}
 	}
 	c.mu.Unlock()
+
+	// batch update stats outside lock
+	c.stats.hits.Add(hits)
+	c.stats.misses.Add(misses)
 
 	if len(missing) == 0 || c.cfg.store == nil {
 		return found, missing, nil
@@ -113,35 +144,24 @@ func (c *Cache[K, V]) GetMany(ctx context.Context, keys []K) (found map[K]V, mis
 	return found, newMissing, nil
 }
 
-// get is the internal get without locking.
-func (c *Cache[K, V]) get(key K) (V, bool) {
-	var zero V
-
+// get is the internal get without locking. Returns result to allow
+// stats updates outside the lock.
+func (c *Cache[K, V]) get(key K) result[V] {
 	ent, ok := c.data[key]
 	if !ok {
-		c.stats.Misses++
-		if c.cfg.onMiss != nil {
-			c.cfg.onMiss(key)
-		}
-		return zero, false
+		var zero V
+		return result[V]{value: zero, ok: false}
 	}
 
 	if ent.isExpired(c.cfg.clock.Now()) {
 		c.delete(key)
-		c.stats.Misses++
-		if c.cfg.onMiss != nil {
-			c.cfg.onMiss(key)
-		}
-		return zero, false
+		var zero V
+		return result[V]{value: zero, ok: false, expired: true}
 	}
 
 	c.evictor.onAccess(key)
 	ent.freq++
-	c.stats.Hits++
-	if c.cfg.onHit != nil {
-		c.cfg.onHit(key, ent.value)
-	}
-	return ent.value, true
+	return result[V]{value: ent.value, ok: true}
 }
 
 // Peek retrieves a value without updating access stats or triggering callbacks.
@@ -198,10 +218,18 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, loader ...LoaderFunc
 
 	// fast path: check cache first
 	c.mu.Lock()
-	v, ok := c.get(key)
+	r := c.get(key)
 	c.mu.Unlock()
-	if ok {
-		return v, nil
+	if r.ok {
+		c.stats.hit()
+		if c.cfg.onHit != nil {
+			c.cfg.onHit(key, r.value)
+		}
+		return r.value, nil
+	}
+	c.stats.miss()
+	if c.cfg.onMiss != nil {
+		c.cfg.onMiss(key)
 	}
 
 	// check store before loading
@@ -384,7 +412,7 @@ func (c *Cache[K, V]) evictOne() {
 	if ent, ok := c.data[key]; ok {
 		c.totalCost -= ent.cost
 		delete(c.data, key)
-		c.stats.Evictions++
+		c.stats.evict()
 		if c.cfg.onEvict != nil {
 			c.cfg.onEvict(key, ent.value)
 		}
@@ -467,11 +495,9 @@ func (c *Cache[K, V]) Len() int {
 }
 
 // Stats returns a snapshot of cache statistics.
-func (c *Cache[K, V]) Stats() Stats {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	return c.stats
+// The returned Snapshot is a point-in-time copy safe for concurrent use.
+func (c *Cache[K, V]) Stats() Snapshot {
+	return c.stats.Snapshot()
 }
 
 // handleStoreErr processes store errors through the configured handler.

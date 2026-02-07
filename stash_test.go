@@ -394,15 +394,15 @@ func (s *StashSuite) TestStats() {
 
 func (s *StashSuite) TestHitRate() {
 	tests := map[string]struct {
-		stats    Stats
+		stats    Snapshot
 		expected float64
 	}{
 		"normal": {
-			stats:    Stats{Hits: 3, Misses: 1},
+			stats:    Snapshot{Hits: 3, Misses: 1},
 			expected: 0.75,
 		},
 		"no accesses": {
-			stats:    Stats{},
+			stats:    Snapshot{},
 			expected: 0,
 		},
 	}
