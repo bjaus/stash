@@ -504,8 +504,32 @@ func (s *mockStore[K, V]) Set(_ context.Context, key K, value V, _ time.Duration
 	return nil
 }
 
+func (s *mockStore[K, V]) GetMany(_ context.Context, keys []K) (map[K]V, error) {
+	result := make(map[K]V)
+	for _, key := range keys {
+		if v, ok := s.data[key]; ok {
+			result[key] = v
+		}
+	}
+	return result, nil
+}
+
+func (s *mockStore[K, V]) SetMany(_ context.Context, entries map[K]V, _ time.Duration) error {
+	for k, v := range entries {
+		s.data[k] = v
+	}
+	return nil
+}
+
 func (s *mockStore[K, V]) Delete(_ context.Context, key K) error {
 	delete(s.data, key)
+	return nil
+}
+
+func (s *mockStore[K, V]) DeleteMany(_ context.Context, keys []K) error {
+	for _, key := range keys {
+		delete(s.data, key)
+	}
 	return nil
 }
 
@@ -628,7 +652,19 @@ func (s *errorStore[K, V]) Set(_ context.Context, _ K, _ V, _ time.Duration) err
 	return errors.New("store error")
 }
 
+func (s *errorStore[K, V]) GetMany(_ context.Context, _ []K) (map[K]V, error) {
+	return nil, errors.New("store error")
+}
+
+func (s *errorStore[K, V]) SetMany(_ context.Context, _ map[K]V, _ time.Duration) error {
+	return errors.New("store error")
+}
+
 func (s *errorStore[K, V]) Delete(_ context.Context, _ K) error {
+	return errors.New("store error")
+}
+
+func (s *errorStore[K, V]) DeleteMany(_ context.Context, _ []K) error {
 	return errors.New("store error")
 }
 
@@ -818,4 +854,355 @@ func TestFIFORemoveNonExistent(t *testing.T) {
 	// delete non-existent key
 	c.Delete(ctx, "nonexistent")
 	// should not panic
+}
+
+func TestPeek(t *testing.T) {
+	ctx := context.Background()
+	c := New[string, int](WithCapacity[string, int](2))
+
+	c.Set(ctx, "a", 1)
+
+	// peek should return value
+	v, ok := c.Peek("a")
+	if !ok || v != 1 {
+		t.Errorf("Peek(a) = %d, %v; want 1, true", v, ok)
+	}
+
+	// peek should not affect stats
+	stats := c.Stats()
+	if stats.Hits != 0 {
+		t.Errorf("Peek should not increment hits; got %d", stats.Hits)
+	}
+
+	// peek non-existent
+	_, ok = c.Peek("b")
+	if ok {
+		t.Error("Peek(b) = _, true; want false")
+	}
+}
+
+func TestPeekExpired(t *testing.T) {
+	ctx := context.Background()
+	clk := &mockClock{now: time.Now()}
+	c := New[string, int](
+		WithTTL[string, int](time.Minute),
+		WithClock[string, int](clk),
+	)
+
+	c.Set(ctx, "a", 1)
+	clk.Advance(2 * time.Minute)
+
+	_, ok := c.Peek("a")
+	if ok {
+		t.Error("Peek expired entry should return false")
+	}
+}
+
+func TestGetMany(t *testing.T) {
+	ctx := context.Background()
+	c := New[string, int]()
+
+	c.Set(ctx, "a", 1)
+	c.Set(ctx, "b", 2)
+
+	found, missing, err := c.GetMany(ctx, []string{"a", "b", "c"})
+	if err != nil {
+		t.Fatalf("GetMany error: %v", err)
+	}
+
+	if len(found) != 2 {
+		t.Errorf("found = %d; want 2", len(found))
+	}
+	if found["a"] != 1 || found["b"] != 2 {
+		t.Errorf("found = %v; want a:1, b:2", found)
+	}
+	if len(missing) != 1 || missing[0] != "c" {
+		t.Errorf("missing = %v; want [c]", missing)
+	}
+}
+
+func TestGetManyWithStore(t *testing.T) {
+	ctx := context.Background()
+	store := newMockStore[string, int]()
+	store.data["c"] = 3
+	store.data["d"] = 4
+
+	c := New[string, int](WithStore(store))
+	c.Set(ctx, "a", 1)
+
+	found, missing, err := c.GetMany(ctx, []string{"a", "c", "e"})
+	if err != nil {
+		t.Fatalf("GetMany error: %v", err)
+	}
+
+	if len(found) != 2 {
+		t.Errorf("found = %d; want 2", len(found))
+	}
+	if found["a"] != 1 || found["c"] != 3 {
+		t.Errorf("found = %v; want a:1, c:3", found)
+	}
+	if len(missing) != 1 || missing[0] != "e" {
+		t.Errorf("missing = %v; want [e]", missing)
+	}
+}
+
+func TestSetMany(t *testing.T) {
+	ctx := context.Background()
+	c := New[string, int]()
+
+	err := c.SetMany(ctx, map[string]int{"a": 1, "b": 2, "c": 3})
+	if err != nil {
+		t.Fatalf("SetMany error: %v", err)
+	}
+
+	if c.Len() != 3 {
+		t.Errorf("Len() = %d; want 3", c.Len())
+	}
+
+	v, ok, _ := c.Get(ctx, "b")
+	if !ok || v != 2 {
+		t.Errorf("Get(b) = %d, %v; want 2, true", v, ok)
+	}
+}
+
+func TestSetManyWithStore(t *testing.T) {
+	ctx := context.Background()
+	store := newMockStore[string, int]()
+	c := New[string, int](WithStore(store))
+
+	err := c.SetMany(ctx, map[string]int{"a": 1, "b": 2})
+	if err != nil {
+		t.Fatalf("SetMany error: %v", err)
+	}
+
+	if store.data["a"] != 1 || store.data["b"] != 2 {
+		t.Errorf("store = %v; want a:1, b:2", store.data)
+	}
+}
+
+func TestDeleteMany(t *testing.T) {
+	ctx := context.Background()
+	c := New[string, int]()
+
+	c.Set(ctx, "a", 1)
+	c.Set(ctx, "b", 2)
+	c.Set(ctx, "c", 3)
+
+	err := c.DeleteMany(ctx, []string{"a", "c"})
+	if err != nil {
+		t.Fatalf("DeleteMany error: %v", err)
+	}
+
+	if c.Has("a") || c.Has("c") {
+		t.Error("a and c should be deleted")
+	}
+	if !c.Has("b") {
+		t.Error("b should still exist")
+	}
+}
+
+func TestDeleteManyWithStore(t *testing.T) {
+	ctx := context.Background()
+	store := newMockStore[string, int]()
+	store.data["a"] = 1
+	store.data["b"] = 2
+
+	c := New[string, int](WithStore(store))
+	c.Set(ctx, "a", 1)
+	c.Set(ctx, "b", 2)
+
+	err := c.DeleteMany(ctx, []string{"a"})
+	if err != nil {
+		t.Fatalf("DeleteMany error: %v", err)
+	}
+
+	if _, ok := store.data["a"]; ok {
+		t.Error("a should be deleted from store")
+	}
+	if _, ok := store.data["b"]; !ok {
+		t.Error("b should still exist in store")
+	}
+}
+
+func TestGetOrLoadWithPerCallLoader(t *testing.T) {
+	ctx := context.Background()
+	defaultLoaded := 0
+	perCallLoaded := 0
+
+	c := New[string, int](
+		WithLoader(func(key string) (int, error) {
+			defaultLoaded++
+			return 1, nil
+		}),
+	)
+
+	// use per-call loader
+	v, err := c.GetOrLoad(ctx, "a", func(_ context.Context, key string) (int, error) {
+		perCallLoaded++
+		return 99, nil
+	})
+	if err != nil {
+		t.Fatalf("GetOrLoad error: %v", err)
+	}
+	if v != 99 {
+		t.Errorf("GetOrLoad = %d; want 99", v)
+	}
+	if perCallLoaded != 1 {
+		t.Errorf("perCallLoaded = %d; want 1", perCallLoaded)
+	}
+	if defaultLoaded != 0 {
+		t.Errorf("defaultLoaded = %d; want 0", defaultLoaded)
+	}
+}
+
+func TestGetManyOrLoad(t *testing.T) {
+	ctx := context.Background()
+	c := New[string, int]()
+
+	c.Set(ctx, "a", 1)
+
+	result, err := c.GetManyOrLoad(ctx, []string{"a", "b", "c"}, func(_ context.Context, keys []string) (map[string]int, error) {
+		loaded := make(map[string]int)
+		for _, k := range keys {
+			loaded[k] = len(k) * 10
+		}
+		return loaded, nil
+	})
+	if err != nil {
+		t.Fatalf("GetManyOrLoad error: %v", err)
+	}
+
+	if result["a"] != 1 {
+		t.Errorf("result[a] = %d; want 1 (cached)", result["a"])
+	}
+	if result["b"] != 10 {
+		t.Errorf("result[b] = %d; want 10 (loaded)", result["b"])
+	}
+	if result["c"] != 10 {
+		t.Errorf("result[c] = %d; want 10 (loaded)", result["c"])
+	}
+}
+
+func TestGetManyOrLoadNilLoader(t *testing.T) {
+	ctx := context.Background()
+	c := New[string, int]()
+
+	c.Set(ctx, "a", 1)
+
+	result, err := c.GetManyOrLoad(ctx, []string{"a", "b"}, nil)
+	if err != nil {
+		t.Fatalf("GetManyOrLoad error: %v", err)
+	}
+
+	if result["a"] != 1 {
+		t.Errorf("result[a] = %d; want 1", result["a"])
+	}
+	if _, ok := result["b"]; ok {
+		t.Error("b should not be in result without loader")
+	}
+}
+
+func TestGetManyOrLoadAllCached(t *testing.T) {
+	ctx := context.Background()
+	c := New[string, int]()
+
+	c.Set(ctx, "a", 1)
+	c.Set(ctx, "b", 2)
+
+	loaderCalled := false
+	result, err := c.GetManyOrLoad(ctx, []string{"a", "b"}, func(_ context.Context, keys []string) (map[string]int, error) {
+		loaderCalled = true
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("GetManyOrLoad error: %v", err)
+	}
+
+	if loaderCalled {
+		t.Error("loader should not be called when all keys are cached")
+	}
+	if result["a"] != 1 || result["b"] != 2 {
+		t.Errorf("result = %v; want a:1, b:2", result)
+	}
+}
+
+func TestStoreErrorHandler(t *testing.T) {
+	ctx := context.Background()
+	handlerCalled := false
+
+	c := New[string, int](
+		WithStore[string, int](&errorStore[string, int]{}),
+		WithStoreErrorHandler[string, int](func(err error) error {
+			handlerCalled = true
+			return nil // swallow the error
+		}),
+	)
+
+	_, _, err := c.Get(ctx, "key")
+	if err != nil {
+		t.Error("error should be swallowed by handler")
+	}
+	if !handlerCalled {
+		t.Error("handler should be called")
+	}
+}
+
+func TestStoreErrorHandlerPropagate(t *testing.T) {
+	ctx := context.Background()
+	customErr := errors.New("custom error")
+
+	c := New[string, int](
+		WithStore[string, int](&errorStore[string, int]{}),
+		WithStoreErrorHandler[string, int](func(err error) error {
+			return customErr
+		}),
+	)
+
+	_, _, err := c.Get(ctx, "key")
+	if !errors.Is(err, customErr) {
+		t.Errorf("error = %v; want %v", err, customErr)
+	}
+}
+
+func TestGetManyStoreError(t *testing.T) {
+	ctx := context.Background()
+	c := New[string, int](WithStore[string, int](&errorStore[string, int]{}))
+
+	_, _, err := c.GetMany(ctx, []string{"a", "b"})
+	if err == nil {
+		t.Error("GetMany with store error should return error")
+	}
+}
+
+func TestSetManyStoreError(t *testing.T) {
+	ctx := context.Background()
+	c := New[string, int](WithStore[string, int](&errorStore[string, int]{}))
+
+	err := c.SetMany(ctx, map[string]int{"a": 1})
+	if err == nil {
+		t.Error("SetMany with store error should return error")
+	}
+}
+
+func TestDeleteManyStoreError(t *testing.T) {
+	ctx := context.Background()
+	c := New[string, int](WithStore[string, int](&errorStore[string, int]{}))
+
+	err := c.DeleteMany(ctx, []string{"a"})
+	if err == nil {
+		t.Error("DeleteMany with store error should return error")
+	}
+}
+
+func TestGetManyOrLoadError(t *testing.T) {
+	ctx := context.Background()
+	c := New[string, int]()
+	loaderErr := errors.New("loader failed")
+
+	_, err := c.GetManyOrLoad(ctx, []string{"a"}, func(_ context.Context, _ []string) (map[string]int, error) {
+		return nil, loaderErr
+	})
+	if !errors.Is(err, loaderErr) {
+		t.Errorf("error = %v; want %v", err, loaderErr)
+	}
 }

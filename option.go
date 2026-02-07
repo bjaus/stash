@@ -8,17 +8,18 @@ const (
 )
 
 type config[K comparable, V any] struct {
-	capacity int
-	ttl      time.Duration
-	policy   Policy
-	loader   func(K) (V, error)
-	costFn   func(V) int64
-	maxCost  int64
-	clock    Clock
-	onEvict  func(K, V)
-	onHit    func(K, V)
-	onMiss   func(K)
-	store    Store[K, V]
+	capacity        int
+	ttl             time.Duration
+	policy          Policy
+	loader          func(K) (V, error)
+	costFn          func(V) int64
+	maxCost         int64
+	clock           Clock
+	onEvict         func(K, V)
+	onHit           func(K, V)
+	onMiss          func(K)
+	store           Store[K, V]
+	storeErrHandler func(error) error
 }
 
 func defaultConfig[K comparable, V any]() config[K, V] {

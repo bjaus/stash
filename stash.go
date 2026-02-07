@@ -59,17 +59,58 @@ func (c *Cache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 	v, ok, err := c.cfg.store.Get(ctx, key)
 	if err != nil {
 		var zero V
-		return zero, false, err
+		return zero, false, c.handleStoreErr(err)
 	}
 
 	if ok {
-		// populate memory cache from store
 		c.mu.Lock()
 		c.set(key, v, c.cfg.ttl)
 		c.mu.Unlock()
 	}
 
 	return v, ok, nil
+}
+
+// GetMany retrieves multiple values from the cache.
+// Returns found values and the keys that were not found.
+func (c *Cache[K, V]) GetMany(ctx context.Context, keys []K) (found map[K]V, missing []K, err error) {
+	found = make(map[K]V, len(keys))
+	missing = make([]K, 0)
+
+	c.mu.Lock()
+	for _, key := range keys {
+		if v, ok := c.get(key); ok {
+			found[key] = v
+		} else {
+			missing = append(missing, key)
+		}
+	}
+	c.mu.Unlock()
+
+	if len(missing) == 0 || c.cfg.store == nil {
+		return found, missing, nil
+	}
+
+	// check store for missing keys
+	storeResults, err := c.cfg.store.GetMany(ctx, missing)
+	if err != nil {
+		return found, missing, c.handleStoreErr(err)
+	}
+
+	// populate found from store and update memory cache
+	c.mu.Lock()
+	newMissing := make([]K, 0, len(missing))
+	for _, key := range missing {
+		if v, ok := storeResults[key]; ok {
+			found[key] = v
+			c.set(key, v, c.cfg.ttl)
+		} else {
+			newMissing = append(newMissing, key)
+		}
+	}
+	c.mu.Unlock()
+
+	return found, newMissing, nil
 }
 
 // get is the internal get without locking.
@@ -103,12 +144,48 @@ func (c *Cache[K, V]) get(key K) (V, bool) {
 	return ent.value, true
 }
 
+// Peek retrieves a value without updating access stats or triggering callbacks.
+// Useful for debugging or when you don't want to affect eviction order.
+func (c *Cache[K, V]) Peek(key K) (V, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var zero V
+	ent, ok := c.data[key]
+	if !ok {
+		return zero, false
+	}
+
+	if ent.isExpired(c.cfg.clock.Now()) {
+		return zero, false
+	}
+
+	return ent.value, true
+}
+
+// LoaderFunc is a function that loads a single value.
+type LoaderFunc[K comparable, V any] func(context.Context, K) (V, error)
+
+// BatchLoaderFunc is a function that loads multiple values.
+type BatchLoaderFunc[K comparable, V any] func(context.Context, []K) (map[K]V, error)
+
 // GetOrLoad retrieves a value from the cache, loading it if not present.
 // Uses single-flight to prevent thundering herd.
-func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K) (V, error) {
+// If loader is provided, it overrides the default loader for this call.
+func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, loader ...LoaderFunc[K, V]) (V, error) {
 	var zero V
 
-	if c.cfg.loader == nil {
+	// determine which loader to use
+	var loadFn LoaderFunc[K, V]
+	if len(loader) > 0 && loader[0] != nil {
+		loadFn = loader[0]
+	} else if c.cfg.loader != nil {
+		loadFn = func(ctx context.Context, k K) (V, error) {
+			return c.cfg.loader(k)
+		}
+	}
+
+	if loadFn == nil {
 		v, ok, err := c.Get(ctx, key)
 		if err != nil {
 			return zero, err
@@ -131,9 +208,10 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K) (V, error) {
 	if c.cfg.store != nil {
 		v, ok, err := c.cfg.store.Get(ctx, key)
 		if err != nil {
-			return zero, err
-		}
-		if ok {
+			if herr := c.handleStoreErr(err); herr != nil {
+				return zero, herr
+			}
+		} else if ok {
 			c.mu.Lock()
 			c.set(key, v, c.cfg.ttl)
 			c.mu.Unlock()
@@ -145,16 +223,14 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K) (V, error) {
 	call := &loadCall[V]{done: make(chan struct{})}
 	actual, loaded := c.loading.LoadOrStore(key, call)
 	if loaded {
-		// another goroutine is loading
 		existing := actual.(*loadCall[V])
 		<-existing.done
 		return existing.value, existing.err
 	}
 
-	// we're the loader
 	defer c.loading.Delete(key)
 
-	v, err := c.cfg.loader(key)
+	v, err := loadFn(ctx, key)
 	call.value = v
 	call.err = err
 	close(call.done)
@@ -169,6 +245,46 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K) (V, error) {
 	return v, nil
 }
 
+// GetManyOrLoad retrieves multiple values, loading missing ones via the loader.
+// The loader receives only the keys not found in cache/store.
+func (c *Cache[K, V]) GetManyOrLoad(ctx context.Context, keys []K, loader BatchLoaderFunc[K, V]) (map[K]V, error) {
+	if loader == nil {
+		found, _, err := c.GetMany(ctx, keys)
+		return found, err
+	}
+
+	found, missing, err := c.GetMany(ctx, keys)
+	if err != nil {
+		return found, err
+	}
+
+	if len(missing) == 0 {
+		return found, nil
+	}
+
+	// load missing keys
+	loaded, err := loader(ctx, missing)
+	if err != nil {
+		return found, err
+	}
+
+	// store loaded values
+	if len(loaded) > 0 {
+		if err := c.SetMany(ctx, loaded); err != nil {
+			// still return loaded values even if store fails
+			for k, v := range loaded {
+				found[k] = v
+			}
+			return found, err
+		}
+		for k, v := range loaded {
+			found[k] = v
+		}
+	}
+
+	return found, nil
+}
+
 // Set adds or updates a value in the cache using the default TTL.
 // If a store is configured, writes to both memory and store.
 func (c *Cache[K, V]) Set(ctx context.Context, key K, value V) error {
@@ -177,7 +293,25 @@ func (c *Cache[K, V]) Set(ctx context.Context, key K, value V) error {
 	c.mu.Unlock()
 
 	if c.cfg.store != nil {
-		return c.cfg.store.Set(ctx, key, value, c.cfg.ttl)
+		if err := c.cfg.store.Set(ctx, key, value, c.cfg.ttl); err != nil {
+			return c.handleStoreErr(err)
+		}
+	}
+	return nil
+}
+
+// SetMany adds or updates multiple values using the default TTL.
+func (c *Cache[K, V]) SetMany(ctx context.Context, entries map[K]V) error {
+	c.mu.Lock()
+	for k, v := range entries {
+		c.set(k, v, c.cfg.ttl)
+	}
+	c.mu.Unlock()
+
+	if c.cfg.store != nil {
+		if err := c.cfg.store.SetMany(ctx, entries, c.cfg.ttl); err != nil {
+			return c.handleStoreErr(err)
+		}
 	}
 	return nil
 }
@@ -190,7 +324,9 @@ func (c *Cache[K, V]) SetWithTTL(ctx context.Context, key K, value V, ttl time.D
 	c.mu.Unlock()
 
 	if c.cfg.store != nil {
-		return c.cfg.store.Set(ctx, key, value, ttl)
+		if err := c.cfg.store.Set(ctx, key, value, ttl); err != nil {
+			return c.handleStoreErr(err)
+		}
 	}
 	return nil
 }
@@ -263,7 +399,25 @@ func (c *Cache[K, V]) Delete(ctx context.Context, key K) error {
 	c.mu.Unlock()
 
 	if c.cfg.store != nil {
-		return c.cfg.store.Delete(ctx, key)
+		if err := c.cfg.store.Delete(ctx, key); err != nil {
+			return c.handleStoreErr(err)
+		}
+	}
+	return nil
+}
+
+// DeleteMany removes multiple keys from the cache.
+func (c *Cache[K, V]) DeleteMany(ctx context.Context, keys []K) error {
+	c.mu.Lock()
+	for _, key := range keys {
+		c.delete(key)
+	}
+	c.mu.Unlock()
+
+	if c.cfg.store != nil {
+		if err := c.cfg.store.DeleteMany(ctx, keys); err != nil {
+			return c.handleStoreErr(err)
+		}
 	}
 	return nil
 }
@@ -318,4 +472,15 @@ func (c *Cache[K, V]) Stats() Stats {
 	defer c.mu.RUnlock()
 
 	return c.stats
+}
+
+// handleStoreErr processes store errors through the configured handler.
+func (c *Cache[K, V]) handleStoreErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if c.cfg.storeErrHandler != nil {
+		return c.cfg.storeErrHandler(err)
+	}
+	return err
 }

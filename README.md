@@ -252,6 +252,7 @@ func TestTTL(t *testing.T) {
 | `WithCost(fn)` | Function to compute entry cost |
 | `WithMaxCost(n)` | Maximum total cost |
 | `WithStore(s)` | External storage backend |
+| `WithStoreErrorHandler(fn)` | Custom handler for store errors |
 | `WithClock(c)` | Clock for time operations (testing) |
 | `OnHit(fn)` | Callback on cache hit |
 | `OnMiss(fn)` | Callback on cache miss |
@@ -262,10 +263,15 @@ func TestTTL(t *testing.T) {
 | Method | Description |
 |--------|-------------|
 | `Get(ctx, key)` | Get value, checking store on miss |
+| `GetMany(ctx, keys)` | Get multiple values at once |
 | `Set(ctx, key, value)` | Set value with default TTL |
+| `SetMany(ctx, entries)` | Set multiple values at once |
 | `SetWithTTL(ctx, key, value, ttl)` | Set value with custom TTL |
 | `Delete(ctx, key)` | Remove entry from cache and store |
-| `GetOrLoad(ctx, key)` | Get or load via loader function |
+| `DeleteMany(ctx, keys)` | Remove multiple entries at once |
+| `GetOrLoad(ctx, key, loader?)` | Get or load via loader (per-call override) |
+| `GetManyOrLoad(ctx, keys, loader)` | Get or batch-load missing values |
+| `Peek(key)` | Get value without affecting stats/eviction |
 | `Has(key)` | Check if key exists in memory |
 | `Clear()` | Remove all entries from memory |
 | `Len()` | Number of entries in memory |

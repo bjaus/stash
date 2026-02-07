@@ -80,14 +80,27 @@
 //
 //	type Store[K comparable, V any] interface {
 //		Get(ctx context.Context, key K) (V, bool, error)
+//		GetMany(ctx context.Context, keys []K) (map[K]V, error)
 //		Set(ctx context.Context, key K, value V, ttl time.Duration) error
+//		SetMany(ctx context.Context, entries map[K]V, ttl time.Duration) error
 //		Delete(ctx context.Context, key K) error
+//		DeleteMany(ctx context.Context, keys []K) error
 //	}
 //
 // When a store is configured, Get checks memory first then the store, and
 // Set writes to both memory and the store:
 //
 //	cache := stash.New[string, *User](stash.WithStore(redisStore))
+//
+// Use WithStoreErrorHandler to control how store errors are handled:
+//
+//	cache := stash.New[string, *User](
+//		stash.WithStore(redisStore),
+//		stash.WithStoreErrorHandler(func(err error) error {
+//			log.Printf("store error: %v", err)
+//			return nil // swallow error, fall back to memory-only
+//		}),
+//	)
 //
 // # Lifecycle Hooks
 //
