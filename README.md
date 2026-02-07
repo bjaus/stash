@@ -5,7 +5,7 @@
 [![CI](https://github.com/bjaus/stash/actions/workflows/ci.yml/badge.svg)](https://github.com/bjaus/stash/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/bjaus/stash/branch/main/graph/badge.svg)](https://codecov.io/gh/bjaus/stash)
 
-Generic in-memory cache for Go with TTL, eviction policies, and pluggable storage.
+Generic cache for Go with TTL, eviction policies, and pluggable storage.
 
 ## Features
 
