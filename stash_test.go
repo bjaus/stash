@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/suite"
 )
 
 type mockClock struct {
@@ -19,470 +21,6 @@ func (c *mockClock) Now() time.Time {
 
 func (c *mockClock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
-}
-
-func TestGetSet(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, int]()
-
-	c.Set(ctx, "a", 1)
-	c.Set(ctx, "b", 2)
-
-	v, ok, err := c.Get(ctx, "a")
-	if err != nil || !ok || v != 1 {
-		t.Errorf("Get(a) = %d, %v, %v; want 1, true, nil", v, ok, err)
-	}
-
-	v, ok, err = c.Get(ctx, "b")
-	if err != nil || !ok || v != 2 {
-		t.Errorf("Get(b) = %d, %v, %v; want 2, true, nil", v, ok, err)
-	}
-
-	_, ok, err = c.Get(ctx, "c")
-	if err != nil || ok {
-		t.Errorf("Get(c) = _, %v, %v; want false, nil", ok, err)
-	}
-}
-
-func TestSetUpdates(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, int]()
-
-	c.Set(ctx, "a", 1)
-	c.Set(ctx, "a", 2)
-
-	v, ok, _ := c.Get(ctx, "a")
-	if !ok || v != 2 {
-		t.Errorf("Get(a) = %d, %v; want 2, true", v, ok)
-	}
-
-	if c.Len() != 1 {
-		t.Errorf("Len() = %d; want 1", c.Len())
-	}
-}
-
-func TestDelete(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, int]()
-
-	c.Set(ctx, "a", 1)
-	c.Delete(ctx, "a")
-
-	_, ok, _ := c.Get(ctx, "a")
-	if ok {
-		t.Error("Get(a) after delete = _, true; want false")
-	}
-}
-
-func TestHas(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, int]()
-
-	if c.Has("a") {
-		t.Error("Has(a) = true; want false")
-	}
-
-	c.Set(ctx, "a", 1)
-
-	if !c.Has("a") {
-		t.Error("Has(a) = false; want true")
-	}
-}
-
-func TestClear(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, int]()
-
-	c.Set(ctx, "a", 1)
-	c.Set(ctx, "b", 2)
-	c.Clear()
-
-	if c.Len() != 0 {
-		t.Errorf("Len() = %d; want 0", c.Len())
-	}
-
-	if c.Has("a") {
-		t.Error("Has(a) after clear = true; want false")
-	}
-}
-
-func TestTTL(t *testing.T) {
-	ctx := context.Background()
-	clk := &mockClock{now: time.Now()}
-	c := New[string, int](
-		WithTTL[string, int](time.Minute),
-		WithClock[string, int](clk),
-	)
-
-	c.Set(ctx, "a", 1)
-
-	v, ok, _ := c.Get(ctx, "a")
-	if !ok || v != 1 {
-		t.Errorf("Get(a) = %d, %v; want 1, true", v, ok)
-	}
-
-	clk.Advance(2 * time.Minute)
-
-	_, ok, _ = c.Get(ctx, "a")
-	if ok {
-		t.Error("Get(a) after expiry = _, true; want false")
-	}
-}
-
-func TestSetWithTTL(t *testing.T) {
-	ctx := context.Background()
-	clk := &mockClock{now: time.Now()}
-	c := New[string, int](
-		WithTTL[string, int](time.Hour),
-		WithClock[string, int](clk),
-	)
-
-	c.SetWithTTL(ctx, "a", 1, time.Second)
-
-	clk.Advance(2 * time.Second)
-
-	_, ok, _ := c.Get(ctx, "a")
-	if ok {
-		t.Error("Get(a) after short TTL = _, true; want false")
-	}
-}
-
-func TestCapacity(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, int](WithCapacity[string, int](2))
-
-	c.Set(ctx, "a", 1)
-	c.Set(ctx, "b", 2)
-	c.Set(ctx, "c", 3)
-
-	if c.Len() != 2 {
-		t.Errorf("Len() = %d; want 2", c.Len())
-	}
-}
-
-func TestLRUEviction(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, int](
-		WithCapacity[string, int](2),
-		WithPolicy[string, int](LRU),
-	)
-
-	c.Set(ctx, "a", 1)
-	c.Set(ctx, "b", 2)
-
-	// access a to make it recently used
-	c.Get(ctx, "a")
-
-	// add c, should evict b (least recently used)
-	c.Set(ctx, "c", 3)
-
-	if !c.Has("a") {
-		t.Error("a should still exist")
-	}
-	if c.Has("b") {
-		t.Error("b should be evicted")
-	}
-	if !c.Has("c") {
-		t.Error("c should exist")
-	}
-}
-
-func TestLFUEviction(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, int](
-		WithCapacity[string, int](2),
-		WithPolicy[string, int](LFU),
-	)
-
-	c.Set(ctx, "a", 1)
-	c.Set(ctx, "b", 2)
-
-	// access a multiple times to increase frequency
-	c.Get(ctx, "a")
-	c.Get(ctx, "a")
-
-	// add c, should evict b (least frequently used)
-	c.Set(ctx, "c", 3)
-
-	if !c.Has("a") {
-		t.Error("a should still exist")
-	}
-	if c.Has("b") {
-		t.Error("b should be evicted")
-	}
-	if !c.Has("c") {
-		t.Error("c should exist")
-	}
-}
-
-func TestFIFOEviction(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, int](
-		WithCapacity[string, int](2),
-		WithPolicy[string, int](FIFO),
-	)
-
-	c.Set(ctx, "a", 1)
-	c.Set(ctx, "b", 2)
-
-	// access a (shouldn't affect FIFO order)
-	c.Get(ctx, "a")
-
-	// add c, should evict a (oldest)
-	c.Set(ctx, "c", 3)
-
-	if c.Has("a") {
-		t.Error("a should be evicted (first in)")
-	}
-	if !c.Has("b") {
-		t.Error("b should still exist")
-	}
-	if !c.Has("c") {
-		t.Error("c should exist")
-	}
-}
-
-func TestCostEviction(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, string](
-		WithCapacity[string, string](100),
-		WithMaxCost[string, string](10),
-		WithCost[string, string](func(v string) int64 { return int64(len(v)) }),
-	)
-
-	c.Set(ctx, "a", "12345") // cost 5
-	c.Set(ctx, "b", "12345") // cost 5, total 10
-
-	if c.Len() != 2 {
-		t.Errorf("Len() = %d; want 2", c.Len())
-	}
-
-	c.Set(ctx, "c", "123") // cost 3, should evict to make room
-
-	if c.Len() > 2 {
-		t.Errorf("Len() = %d; want <= 2", c.Len())
-	}
-}
-
-func TestLoader(t *testing.T) {
-	ctx := context.Background()
-	loaded := 0
-	c := New[string, int](
-		WithLoader(func(key string) (int, error) {
-			loaded++
-			return len(key), nil
-		}),
-	)
-
-	v, err := c.GetOrLoad(ctx, "abc")
-	if err != nil {
-		t.Fatalf("GetOrLoad error: %v", err)
-	}
-	if v != 3 {
-		t.Errorf("GetOrLoad = %d; want 3", v)
-	}
-	if loaded != 1 {
-		t.Errorf("loaded = %d; want 1", loaded)
-	}
-
-	// second call should use cache
-	v, err = c.GetOrLoad(ctx, "abc")
-	if err != nil {
-		t.Fatalf("GetOrLoad error: %v", err)
-	}
-	if v != 3 {
-		t.Errorf("GetOrLoad = %d; want 3", v)
-	}
-	if loaded != 1 {
-		t.Errorf("loaded = %d; want 1 (cached)", loaded)
-	}
-}
-
-func TestLoaderError(t *testing.T) {
-	ctx := context.Background()
-	testErr := errors.New("load failed")
-	c := New[string, int](
-		WithLoader(func(key string) (int, error) {
-			return 0, testErr
-		}),
-	)
-
-	_, err := c.GetOrLoad(ctx, "a")
-	if !errors.Is(err, testErr) {
-		t.Errorf("GetOrLoad error = %v; want %v", err, testErr)
-	}
-
-	// should not be cached
-	if c.Has("a") {
-		t.Error("failed load should not cache")
-	}
-}
-
-func TestLoaderSingleFlight(t *testing.T) {
-	ctx := context.Background()
-	var loadCount atomic.Int32
-	proceed := make(chan struct{})
-
-	c := New[string, int](
-		WithLoader(func(key string) (int, error) {
-			loadCount.Add(1)
-			<-proceed
-			return 42, nil
-		}),
-	)
-
-	var wg sync.WaitGroup
-	results := make([]int, 3)
-	errs := make([]error, 3)
-
-	for i := range 3 {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			results[idx], errs[idx] = c.GetOrLoad(ctx, "key")
-		}(i)
-	}
-
-	// give goroutines time to start and coalesce on the same load call
-	time.Sleep(10 * time.Millisecond)
-
-	// signal to proceed
-	close(proceed)
-	wg.Wait()
-
-	if loadCount.Load() != 1 {
-		t.Errorf("load count = %d; want 1 (single-flight)", loadCount.Load())
-	}
-
-	for i, err := range errs {
-		if err != nil {
-			t.Errorf("goroutine %d error: %v", i, err)
-		}
-		if results[i] != 42 {
-			t.Errorf("goroutine %d result = %d; want 42", i, results[i])
-		}
-	}
-}
-
-func TestStats(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, int](WithCapacity[string, int](2))
-
-	c.Set(ctx, "a", 1)
-	c.Get(ctx, "a") // hit
-	c.Get(ctx, "b") // miss
-	c.Set(ctx, "b", 2)
-	c.Set(ctx, "c", 3) // eviction
-
-	stats := c.Stats()
-	if stats.Hits != 1 {
-		t.Errorf("Hits = %d; want 1", stats.Hits)
-	}
-	if stats.Misses != 1 {
-		t.Errorf("Misses = %d; want 1", stats.Misses)
-	}
-	if stats.Evictions != 1 {
-		t.Errorf("Evictions = %d; want 1", stats.Evictions)
-	}
-}
-
-func TestHitRate(t *testing.T) {
-	s := Stats{Hits: 3, Misses: 1}
-	if s.HitRate() != 0.75 {
-		t.Errorf("HitRate() = %f; want 0.75", s.HitRate())
-	}
-
-	s = Stats{}
-	if s.HitRate() != 0 {
-		t.Errorf("HitRate() with no accesses = %f; want 0", s.HitRate())
-	}
-}
-
-func TestCallbacks(t *testing.T) {
-	ctx := context.Background()
-	var hitKey string
-	var hitVal int
-	var missKey string
-	var evictKey string
-	var evictVal int
-
-	c := New[string, int](
-		WithCapacity[string, int](1),
-		OnHit[string, int](func(k string, v int) { hitKey = k; hitVal = v }),
-		OnMiss[string, int](func(k string) { missKey = k }),
-		OnEvict[string, int](func(k string, v int) { evictKey = k; evictVal = v }),
-	)
-
-	c.Set(ctx, "a", 1)
-	c.Get(ctx, "a")
-	if hitKey != "a" || hitVal != 1 {
-		t.Errorf("OnHit called with %s, %d; want a, 1", hitKey, hitVal)
-	}
-
-	c.Get(ctx, "b")
-	if missKey != "b" {
-		t.Errorf("OnMiss called with %s; want b", missKey)
-	}
-
-	c.Set(ctx, "c", 3) // evicts a
-	if evictKey != "a" || evictVal != 1 {
-		t.Errorf("OnEvict called with %s, %d; want a, 1", evictKey, evictVal)
-	}
-}
-
-func TestConcurrentAccess(t *testing.T) {
-	ctx := context.Background()
-	c := New[int, int](WithCapacity[int, int](100))
-
-	var wg sync.WaitGroup
-	for i := range 100 {
-		wg.Add(1)
-		go func(n int) {
-			defer wg.Done()
-			c.Set(ctx, n, n*2)
-			c.Get(ctx, n)
-			c.Has(n)
-			c.Delete(ctx, n)
-		}(i)
-	}
-	wg.Wait()
-}
-
-func TestHasWithExpiry(t *testing.T) {
-	ctx := context.Background()
-	clk := &mockClock{now: time.Now()}
-	c := New[string, int](
-		WithTTL[string, int](time.Minute),
-		WithClock[string, int](clk),
-	)
-
-	c.Set(ctx, "a", 1)
-
-	if !c.Has("a") {
-		t.Error("Has(a) = false; want true")
-	}
-
-	clk.Advance(2 * time.Minute)
-
-	if c.Has("a") {
-		t.Error("Has(a) after expiry = true; want false")
-	}
-}
-
-func TestGetOrLoadWithoutLoader(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, int]()
-
-	c.Set(ctx, "a", 1)
-	v, err := c.GetOrLoad(ctx, "a")
-	if err != nil || v != 1 {
-		t.Errorf("GetOrLoad(a) = %d, %v; want 1, nil", v, err)
-	}
-
-	v, err = c.GetOrLoad(ctx, "b")
-	if err != nil || v != 0 {
-		t.Errorf("GetOrLoad(b) = %d, %v; want 0, nil", v, err)
-	}
 }
 
 // mockStore is a simple in-memory store for testing.
@@ -533,114 +71,6 @@ func (s *mockStore[K, V]) DeleteMany(_ context.Context, keys []K) error {
 	return nil
 }
 
-func TestStoreGet(t *testing.T) {
-	ctx := context.Background()
-	store := newMockStore[string, int]()
-	store.data["external"] = 42
-
-	c := New[string, int](WithStore(store))
-
-	// not in memory, should fetch from store
-	v, ok, err := c.Get(ctx, "external")
-	if err != nil {
-		t.Fatalf("Get error: %v", err)
-	}
-	if !ok || v != 42 {
-		t.Errorf("Get = %d, %v; want 42, true", v, ok)
-	}
-
-	// should now be in memory
-	if !c.Has("external") {
-		t.Error("Has after store fetch = false; want true")
-	}
-}
-
-func TestStoreSet(t *testing.T) {
-	ctx := context.Background()
-	store := newMockStore[string, int]()
-	c := New[string, int](WithStore(store))
-
-	err := c.Set(ctx, "key", 123)
-	if err != nil {
-		t.Fatalf("Set error: %v", err)
-	}
-
-	// should be in memory
-	if !c.Has("key") {
-		t.Error("Has = false; want true")
-	}
-
-	// should be in store
-	if store.data["key"] != 123 {
-		t.Errorf("store.data[key] = %d; want 123", store.data["key"])
-	}
-}
-
-func TestStoreDelete(t *testing.T) {
-	ctx := context.Background()
-	store := newMockStore[string, int]()
-	store.data["key"] = 1
-
-	c := New[string, int](WithStore(store))
-	c.Set(ctx, "key", 1)
-
-	err := c.Delete(ctx, "key")
-	if err != nil {
-		t.Fatalf("Delete error: %v", err)
-	}
-
-	// should be gone from memory
-	if c.Has("key") {
-		t.Error("Has(key) after delete = true; want false")
-	}
-
-	// should be gone from store
-	if _, ok := store.data["key"]; ok {
-		t.Error("key still in store after delete")
-	}
-}
-
-func TestGetWithoutStore(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, int]()
-
-	c.Set(ctx, "a", 1)
-	v, ok, err := c.Get(ctx, "a")
-	if err != nil || !ok || v != 1 {
-		t.Errorf("Get(a) = %d, %v, %v; want 1, true, nil", v, ok, err)
-	}
-
-	v, ok, err = c.Get(ctx, "b")
-	if err != nil || ok || v != 0 {
-		t.Errorf("Get(b) = %d, %v, %v; want 0, false, nil", v, ok, err)
-	}
-}
-
-func TestLFUDelete(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, int](WithPolicy[string, int](LFU))
-
-	c.Set(ctx, "a", 1)
-	c.Get(ctx, "a") // increase frequency
-	c.Delete(ctx, "a")
-
-	if c.Has("a") {
-		t.Error("Has(a) after delete = true; want false")
-	}
-}
-
-func TestFIFODelete(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, int](WithPolicy[string, int](FIFO))
-
-	c.Set(ctx, "a", 1)
-	c.Delete(ctx, "a")
-
-	if c.Has("a") {
-		t.Error("Has(a) after delete = true; want false")
-	}
-}
-
 type errorStore[K comparable, V any] struct{}
 
 func (s *errorStore[K, V]) Get(_ context.Context, _ K) (V, bool, error) {
@@ -668,53 +98,508 @@ func (s *errorStore[K, V]) DeleteMany(_ context.Context, _ []K) error {
 	return errors.New("store error")
 }
 
-func TestStoreGetError(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, int](WithStore[string, int](&errorStore[string, int]{}))
+type StashSuite struct {
+	suite.Suite
+	ctx context.Context
+	clk *mockClock
+}
 
-	_, _, err := c.Get(ctx, "key")
-	if err == nil {
-		t.Error("Get with store error should return error")
+func (s *StashSuite) SetupTest() {
+	s.ctx = context.Background()
+	s.clk = &mockClock{now: time.Now()}
+}
+
+func TestStashSuite(t *testing.T) {
+	suite.Run(t, new(StashSuite))
+}
+
+func (s *StashSuite) TestGetSet() {
+	c := New[string, int]()
+
+	c.Set(s.ctx, "a", 1)
+	c.Set(s.ctx, "b", 2)
+
+	v, ok, err := c.Get(s.ctx, "a")
+	s.Require().NoError(err)
+	s.True(ok)
+	s.Equal(1, v)
+
+	v, ok, err = c.Get(s.ctx, "b")
+	s.Require().NoError(err)
+	s.True(ok)
+	s.Equal(2, v)
+
+	_, ok, err = c.Get(s.ctx, "c")
+	s.Require().NoError(err)
+	s.False(ok)
+}
+
+func (s *StashSuite) TestSetUpdates() {
+	c := New[string, int]()
+
+	c.Set(s.ctx, "a", 1)
+	c.Set(s.ctx, "a", 2)
+
+	v, ok, err := c.Get(s.ctx, "a")
+	s.Require().NoError(err)
+	s.True(ok)
+	s.Equal(2, v)
+	s.Equal(1, c.Len())
+}
+
+func (s *StashSuite) TestDelete() {
+	c := New[string, int]()
+
+	c.Set(s.ctx, "a", 1)
+	c.Delete(s.ctx, "a")
+
+	_, ok, err := c.Get(s.ctx, "a")
+	s.Require().NoError(err)
+	s.False(ok)
+}
+
+func (s *StashSuite) TestHas() {
+	c := New[string, int]()
+
+	s.False(c.Has("a"))
+
+	c.Set(s.ctx, "a", 1)
+
+	s.True(c.Has("a"))
+}
+
+func (s *StashSuite) TestClear() {
+	c := New[string, int]()
+
+	c.Set(s.ctx, "a", 1)
+	c.Set(s.ctx, "b", 2)
+	c.Clear()
+
+	s.Equal(0, c.Len())
+	s.False(c.Has("a"))
+}
+
+func (s *StashSuite) TestTTL() {
+	c := New[string, int](
+		WithTTL[string, int](time.Minute),
+		WithClock[string, int](s.clk),
+	)
+
+	c.Set(s.ctx, "a", 1)
+
+	v, ok, err := c.Get(s.ctx, "a")
+	s.Require().NoError(err)
+	s.True(ok)
+	s.Equal(1, v)
+
+	s.clk.Advance(2 * time.Minute)
+
+	_, ok, err = c.Get(s.ctx, "a")
+	s.Require().NoError(err)
+	s.False(ok)
+}
+
+func (s *StashSuite) TestSetWithTTL() {
+	c := New[string, int](
+		WithTTL[string, int](time.Hour),
+		WithClock[string, int](s.clk),
+	)
+
+	c.SetWithTTL(s.ctx, "a", 1, time.Second)
+
+	s.clk.Advance(2 * time.Second)
+
+	_, ok, err := c.Get(s.ctx, "a")
+	s.Require().NoError(err)
+	s.False(ok)
+}
+
+func (s *StashSuite) TestCapacity() {
+	c := New[string, int](WithCapacity[string, int](2))
+
+	c.Set(s.ctx, "a", 1)
+	c.Set(s.ctx, "b", 2)
+	c.Set(s.ctx, "c", 3)
+
+	s.Equal(2, c.Len())
+}
+
+func (s *StashSuite) TestLRUEviction() {
+	c := New[string, int](
+		WithCapacity[string, int](2),
+		WithPolicy[string, int](LRU),
+	)
+
+	c.Set(s.ctx, "a", 1)
+	c.Set(s.ctx, "b", 2)
+
+	// access a to make it recently used
+	c.Get(s.ctx, "a")
+
+	// add c, should evict b (least recently used)
+	c.Set(s.ctx, "c", 3)
+
+	s.True(c.Has("a"), "a should still exist")
+	s.False(c.Has("b"), "b should be evicted")
+	s.True(c.Has("c"), "c should exist")
+}
+
+func (s *StashSuite) TestLFUEviction() {
+	c := New[string, int](
+		WithCapacity[string, int](2),
+		WithPolicy[string, int](LFU),
+	)
+
+	c.Set(s.ctx, "a", 1)
+	c.Set(s.ctx, "b", 2)
+
+	// access a multiple times to increase frequency
+	c.Get(s.ctx, "a")
+	c.Get(s.ctx, "a")
+
+	// add c, should evict b (least frequently used)
+	c.Set(s.ctx, "c", 3)
+
+	s.True(c.Has("a"), "a should still exist")
+	s.False(c.Has("b"), "b should be evicted")
+	s.True(c.Has("c"), "c should exist")
+}
+
+func (s *StashSuite) TestFIFOEviction() {
+	c := New[string, int](
+		WithCapacity[string, int](2),
+		WithPolicy[string, int](FIFO),
+	)
+
+	c.Set(s.ctx, "a", 1)
+	c.Set(s.ctx, "b", 2)
+
+	// access a (shouldn't affect FIFO order)
+	c.Get(s.ctx, "a")
+
+	// add c, should evict a (oldest)
+	c.Set(s.ctx, "c", 3)
+
+	s.False(c.Has("a"), "a should be evicted (first in)")
+	s.True(c.Has("b"), "b should still exist")
+	s.True(c.Has("c"), "c should exist")
+}
+
+func (s *StashSuite) TestCostEviction() {
+	c := New[string, string](
+		WithCapacity[string, string](100),
+		WithMaxCost[string, string](10),
+		WithCost[string, string](func(v string) int64 { return int64(len(v)) }),
+	)
+
+	c.Set(s.ctx, "a", "12345") // cost 5
+	c.Set(s.ctx, "b", "12345") // cost 5, total 10
+
+	s.Equal(2, c.Len())
+
+	c.Set(s.ctx, "c", "123") // cost 3, should evict to make room
+
+	s.LessOrEqual(c.Len(), 2)
+}
+
+func (s *StashSuite) TestLoader() {
+	loaded := 0
+	c := New[string, int](
+		WithLoader(func(key string) (int, error) {
+			loaded++
+			return len(key), nil
+		}),
+	)
+
+	v, err := c.GetOrLoad(s.ctx, "abc")
+	s.Require().NoError(err)
+	s.Equal(3, v)
+	s.Equal(1, loaded)
+
+	// second call should use cache
+	v, err = c.GetOrLoad(s.ctx, "abc")
+	s.Require().NoError(err)
+	s.Equal(3, v)
+	s.Equal(1, loaded, "loader should not be called again (cached)")
+}
+
+func (s *StashSuite) TestLoaderError() {
+	testErr := errors.New("load failed")
+	c := New[string, int](
+		WithLoader(func(key string) (int, error) {
+			return 0, testErr
+		}),
+	)
+
+	_, err := c.GetOrLoad(s.ctx, "a")
+	s.Require().ErrorIs(err, testErr)
+
+	// should not be cached
+	s.False(c.Has("a"), "failed load should not cache")
+}
+
+func (s *StashSuite) TestLoaderSingleFlight() {
+	var loadCount atomic.Int32
+	proceed := make(chan struct{})
+
+	c := New[string, int](
+		WithLoader(func(key string) (int, error) {
+			loadCount.Add(1)
+			<-proceed
+			return 42, nil
+		}),
+	)
+
+	var wg sync.WaitGroup
+	results := make([]int, 3)
+	errs := make([]error, 3)
+
+	for i := range 3 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			results[idx], errs[idx] = c.GetOrLoad(s.ctx, "key")
+		}(i)
+	}
+
+	// give goroutines time to start and coalesce on the same load call
+	time.Sleep(10 * time.Millisecond)
+
+	// signal to proceed
+	close(proceed)
+	wg.Wait()
+
+	s.Equal(int32(1), loadCount.Load(), "single-flight should coalesce loads")
+
+	for i, err := range errs {
+		s.NoError(err, "goroutine %d error", i)
+		s.Equal(42, results[i], "goroutine %d result", i)
 	}
 }
 
-func TestStoreSetError(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, int](WithStore[string, int](&errorStore[string, int]{}))
+func (s *StashSuite) TestStats() {
+	c := New[string, int](WithCapacity[string, int](2))
 
-	err := c.Set(ctx, "key", 1)
-	if err == nil {
-		t.Error("Set with store error should return error")
+	c.Set(s.ctx, "a", 1)
+	c.Get(s.ctx, "a") // hit
+	c.Get(s.ctx, "b") // miss
+	c.Set(s.ctx, "b", 2)
+	c.Set(s.ctx, "c", 3) // eviction
+
+	stats := c.Stats()
+	s.Equal(int64(1), stats.Hits)
+	s.Equal(int64(1), stats.Misses)
+	s.Equal(int64(1), stats.Evictions)
+}
+
+func (s *StashSuite) TestHitRate() {
+	tests := map[string]struct {
+		stats    Stats
+		expected float64
+	}{
+		"normal": {
+			stats:    Stats{Hits: 3, Misses: 1},
+			expected: 0.75,
+		},
+		"no accesses": {
+			stats:    Stats{},
+			expected: 0,
+		},
+	}
+
+	for name, tc := range tests {
+		s.Run(name, func() {
+			s.Equal(tc.expected, tc.stats.HitRate())
+		})
 	}
 }
 
-func TestStoreDeleteError(t *testing.T) {
-	ctx := context.Background()
-	c := New[string, int](WithStore[string, int](&errorStore[string, int]{}))
+func (s *StashSuite) TestCallbacks() {
+	var hitKey string
+	var hitVal int
+	var missKey string
+	var evictKey string
+	var evictVal int
 
-	err := c.Delete(ctx, "key")
-	if err == nil {
-		t.Error("Delete with store error should return error")
-	}
+	c := New[string, int](
+		WithCapacity[string, int](1),
+		OnHit[string, int](func(k string, v int) { hitKey = k; hitVal = v }),
+		OnMiss[string, int](func(k string) { missKey = k }),
+		OnEvict[string, int](func(k string, v int) { evictKey = k; evictVal = v }),
+	)
+
+	c.Set(s.ctx, "a", 1)
+	c.Get(s.ctx, "a")
+	s.Equal("a", hitKey)
+	s.Equal(1, hitVal)
+
+	c.Get(s.ctx, "b")
+	s.Equal("b", missKey)
+
+	c.Set(s.ctx, "c", 3) // evicts a
+	s.Equal("a", evictKey)
+	s.Equal(1, evictVal)
 }
 
-func TestSetWithTTLStore(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestConcurrentAccess() {
+	c := New[int, int](WithCapacity[int, int](100))
+
+	var wg sync.WaitGroup
+	for i := range 100 {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			c.Set(s.ctx, n, n*2)
+			c.Get(s.ctx, n)
+			c.Has(n)
+			c.Delete(s.ctx, n)
+		}(i)
+	}
+	wg.Wait()
+}
+
+func (s *StashSuite) TestHasWithExpiry() {
+	c := New[string, int](
+		WithTTL[string, int](time.Minute),
+		WithClock[string, int](s.clk),
+	)
+
+	c.Set(s.ctx, "a", 1)
+
+	s.True(c.Has("a"))
+
+	s.clk.Advance(2 * time.Minute)
+
+	s.False(c.Has("a"))
+}
+
+func (s *StashSuite) TestGetOrLoadWithoutLoader() {
+	c := New[string, int]()
+
+	c.Set(s.ctx, "a", 1)
+	v, err := c.GetOrLoad(s.ctx, "a")
+	s.Require().NoError(err)
+	s.Equal(1, v)
+
+	v, err = c.GetOrLoad(s.ctx, "b")
+	s.Require().NoError(err)
+	s.Equal(0, v)
+}
+
+func (s *StashSuite) TestStoreGet() {
+	store := newMockStore[string, int]()
+	store.data["external"] = 42
+
+	c := New[string, int](WithStore(store))
+
+	// not in memory, should fetch from store
+	v, ok, err := c.Get(s.ctx, "external")
+	s.Require().NoError(err)
+	s.True(ok)
+	s.Equal(42, v)
+
+	// should now be in memory
+	s.True(c.Has("external"))
+}
+
+func (s *StashSuite) TestStoreSet() {
 	store := newMockStore[string, int]()
 	c := New[string, int](WithStore(store))
 
-	err := c.SetWithTTL(ctx, "key", 123, time.Hour)
-	if err != nil {
-		t.Fatalf("SetWithTTL error: %v", err)
-	}
+	err := c.Set(s.ctx, "key", 123)
+	s.Require().NoError(err)
 
-	if store.data["key"] != 123 {
-		t.Errorf("store.data[key] = %d; want 123", store.data["key"])
-	}
+	// should be in memory
+	s.True(c.Has("key"))
+
+	// should be in store
+	s.Equal(123, store.data["key"])
 }
 
-func TestGetOrLoadWithStore(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestStoreDelete() {
+	store := newMockStore[string, int]()
+	store.data["key"] = 1
+
+	c := New[string, int](WithStore(store))
+	c.Set(s.ctx, "key", 1)
+
+	err := c.Delete(s.ctx, "key")
+	s.Require().NoError(err)
+
+	// should be gone from memory
+	s.False(c.Has("key"))
+
+	// should be gone from store
+	_, ok := store.data["key"]
+	s.False(ok)
+}
+
+func (s *StashSuite) TestGetWithoutStore() {
+	c := New[string, int]()
+
+	c.Set(s.ctx, "a", 1)
+	v, ok, err := c.Get(s.ctx, "a")
+	s.Require().NoError(err)
+	s.True(ok)
+	s.Equal(1, v)
+
+	v, ok, err = c.Get(s.ctx, "b")
+	s.Require().NoError(err)
+	s.False(ok)
+	s.Equal(0, v)
+}
+
+func (s *StashSuite) TestLFUDelete() {
+	c := New[string, int](WithPolicy[string, int](LFU))
+
+	c.Set(s.ctx, "a", 1)
+	c.Get(s.ctx, "a") // increase frequency
+	c.Delete(s.ctx, "a")
+
+	s.False(c.Has("a"))
+}
+
+func (s *StashSuite) TestFIFODelete() {
+	c := New[string, int](WithPolicy[string, int](FIFO))
+
+	c.Set(s.ctx, "a", 1)
+	c.Delete(s.ctx, "a")
+
+	s.False(c.Has("a"))
+}
+
+func (s *StashSuite) TestStoreGetError() {
+	c := New[string, int](WithStore[string, int](&errorStore[string, int]{}))
+
+	_, _, err := c.Get(s.ctx, "key")
+	s.Error(err)
+}
+
+func (s *StashSuite) TestStoreSetError() {
+	c := New[string, int](WithStore[string, int](&errorStore[string, int]{}))
+
+	err := c.Set(s.ctx, "key", 1)
+	s.Error(err)
+}
+
+func (s *StashSuite) TestStoreDeleteError() {
+	c := New[string, int](WithStore[string, int](&errorStore[string, int]{}))
+
+	err := c.Delete(s.ctx, "key")
+	s.Error(err)
+}
+
+func (s *StashSuite) TestSetWithTTLStore() {
+	store := newMockStore[string, int]()
+	c := New[string, int](WithStore(store))
+
+	err := c.SetWithTTL(s.ctx, "key", 123, time.Hour)
+	s.Require().NoError(err)
+
+	s.Equal(123, store.data["key"])
+}
+
+func (s *StashSuite) TestGetOrLoadWithStore() {
 	store := newMockStore[string, int]()
 	store.data["external"] = 99
 
@@ -728,32 +613,19 @@ func TestGetOrLoadWithStore(t *testing.T) {
 	)
 
 	// should find in store, not call loader
-	v, err := c.GetOrLoad(ctx, "external")
-	if err != nil {
-		t.Fatalf("GetOrLoad error: %v", err)
-	}
-	if v != 99 {
-		t.Errorf("GetOrLoad = %d; want 99 (from store)", v)
-	}
-	if loaded != 0 {
-		t.Error("loader should not be called when value is in store")
-	}
+	v, err := c.GetOrLoad(s.ctx, "external")
+	s.Require().NoError(err)
+	s.Equal(99, v)
+	s.Equal(0, loaded, "loader should not be called when value is in store")
 
 	// should call loader for missing key
-	v, err = c.GetOrLoad(ctx, "missing")
-	if err != nil {
-		t.Fatalf("GetOrLoad error: %v", err)
-	}
-	if v != 42 {
-		t.Errorf("GetOrLoad = %d; want 42 (from loader)", v)
-	}
-	if loaded != 1 {
-		t.Errorf("loaded = %d; want 1", loaded)
-	}
+	v, err = c.GetOrLoad(s.ctx, "missing")
+	s.Require().NoError(err)
+	s.Equal(42, v)
+	s.Equal(1, loaded)
 }
 
-func TestGetOrLoadStoreError(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestGetOrLoadStoreError() {
 	c := New[string, int](
 		WithStore[string, int](&errorStore[string, int]{}),
 		WithLoader(func(key string) (int, error) {
@@ -761,271 +633,209 @@ func TestGetOrLoadStoreError(t *testing.T) {
 		}),
 	)
 
-	_, err := c.GetOrLoad(ctx, "key")
-	if err == nil {
-		t.Error("GetOrLoad with store error should return error")
-	}
+	_, err := c.GetOrLoad(s.ctx, "key")
+	s.Error(err)
 }
 
-func TestSetWithTTLStoreError(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestSetWithTTLStoreError() {
 	c := New[string, int](WithStore[string, int](&errorStore[string, int]{}))
 
-	err := c.SetWithTTL(ctx, "key", 1, time.Hour)
-	if err == nil {
-		t.Error("SetWithTTL with store error should return error")
-	}
+	err := c.SetWithTTL(s.ctx, "key", 1, time.Hour)
+	s.Error(err)
 }
 
-func TestFIFOAccess(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestFIFOAccess() {
 	c := New[string, int](
 		WithCapacity[string, int](2),
 		WithPolicy[string, int](FIFO),
 	)
 
-	c.Set(ctx, "a", 1)
+	c.Set(s.ctx, "a", 1)
 	// access should be a no-op for FIFO but still gets called
-	c.Get(ctx, "a")
-	c.Get(ctx, "a")
+	c.Get(s.ctx, "a")
+	c.Get(s.ctx, "a")
 
-	if !c.Has("a") {
-		t.Error("a should still exist")
-	}
+	s.True(c.Has("a"))
 }
 
-func TestLFUInsertExisting(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestLFUInsertExisting() {
 	c := New[string, int](
 		WithCapacity[string, int](2),
 		WithPolicy[string, int](LFU),
 	)
 
-	c.Set(ctx, "a", 1)
-	c.Get(ctx, "a")    // freq 2
-	c.Set(ctx, "a", 2) // update existing, should increase freq
+	c.Set(s.ctx, "a", 1)
+	c.Get(s.ctx, "a")    // freq 2
+	c.Set(s.ctx, "a", 2) // update existing, should increase freq
 
-	v, ok, _ := c.Get(ctx, "a")
-	if !ok || v != 2 {
-		t.Errorf("Get(a) = %d, %v; want 2, true", v, ok)
-	}
+	v, ok, err := c.Get(s.ctx, "a")
+	s.Require().NoError(err)
+	s.True(ok)
+	s.Equal(2, v)
 }
 
-func TestFIFOInsertExisting(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestFIFOInsertExisting() {
 	c := New[string, int](
 		WithCapacity[string, int](2),
 		WithPolicy[string, int](FIFO),
 	)
 
-	c.Set(ctx, "a", 1)
-	c.Set(ctx, "a", 2) // update existing, FIFO should not move it
+	c.Set(s.ctx, "a", 1)
+	c.Set(s.ctx, "a", 2) // update existing, FIFO should not move it
 
-	v, ok, _ := c.Get(ctx, "a")
-	if !ok || v != 2 {
-		t.Errorf("Get(a) = %d, %v; want 2, true", v, ok)
-	}
+	v, ok, err := c.Get(s.ctx, "a")
+	s.Require().NoError(err)
+	s.True(ok)
+	s.Equal(2, v)
 }
 
-func TestLFUAccessNonExistent(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestLFUAccessNonExistent() {
 	c := New[string, int](WithPolicy[string, int](LFU))
 
 	// access non-existent key (miss path)
-	_, ok, _ := c.Get(ctx, "nonexistent")
-	if ok {
-		t.Error("Get(nonexistent) = _, true; want false")
-	}
+	_, ok, err := c.Get(s.ctx, "nonexistent")
+	s.Require().NoError(err)
+	s.False(ok)
 }
 
-func TestLFURemoveNonExistent(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestLFURemoveNonExistent() {
 	c := New[string, int](WithPolicy[string, int](LFU))
 
-	// delete non-existent key
-	c.Delete(ctx, "nonexistent")
-	// should not panic
+	// delete non-existent key should not panic
+	c.Delete(s.ctx, "nonexistent")
 }
 
-func TestFIFORemoveNonExistent(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestFIFORemoveNonExistent() {
 	c := New[string, int](WithPolicy[string, int](FIFO))
 
-	// delete non-existent key
-	c.Delete(ctx, "nonexistent")
-	// should not panic
+	// delete non-existent key should not panic
+	c.Delete(s.ctx, "nonexistent")
 }
 
-func TestPeek(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestPeek() {
 	c := New[string, int](WithCapacity[string, int](2))
 
-	c.Set(ctx, "a", 1)
+	c.Set(s.ctx, "a", 1)
 
 	// peek should return value
 	v, ok := c.Peek("a")
-	if !ok || v != 1 {
-		t.Errorf("Peek(a) = %d, %v; want 1, true", v, ok)
-	}
+	s.True(ok)
+	s.Equal(1, v)
 
 	// peek should not affect stats
 	stats := c.Stats()
-	if stats.Hits != 0 {
-		t.Errorf("Peek should not increment hits; got %d", stats.Hits)
-	}
+	s.Equal(int64(0), stats.Hits, "peek should not increment hits")
 
 	// peek non-existent
 	_, ok = c.Peek("b")
-	if ok {
-		t.Error("Peek(b) = _, true; want false")
-	}
+	s.False(ok)
 }
 
-func TestPeekExpired(t *testing.T) {
-	ctx := context.Background()
-	clk := &mockClock{now: time.Now()}
+func (s *StashSuite) TestPeekExpired() {
 	c := New[string, int](
 		WithTTL[string, int](time.Minute),
-		WithClock[string, int](clk),
+		WithClock[string, int](s.clk),
 	)
 
-	c.Set(ctx, "a", 1)
-	clk.Advance(2 * time.Minute)
+	c.Set(s.ctx, "a", 1)
+	s.clk.Advance(2 * time.Minute)
 
 	_, ok := c.Peek("a")
-	if ok {
-		t.Error("Peek expired entry should return false")
-	}
+	s.False(ok, "peek expired entry should return false")
 }
 
-func TestGetMany(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestGetMany() {
 	c := New[string, int]()
 
-	c.Set(ctx, "a", 1)
-	c.Set(ctx, "b", 2)
+	c.Set(s.ctx, "a", 1)
+	c.Set(s.ctx, "b", 2)
 
-	found, missing, err := c.GetMany(ctx, []string{"a", "b", "c"})
-	if err != nil {
-		t.Fatalf("GetMany error: %v", err)
-	}
+	found, missing, err := c.GetMany(s.ctx, []string{"a", "b", "c"})
+	s.Require().NoError(err)
 
-	if len(found) != 2 {
-		t.Errorf("found = %d; want 2", len(found))
-	}
-	if found["a"] != 1 || found["b"] != 2 {
-		t.Errorf("found = %v; want a:1, b:2", found)
-	}
-	if len(missing) != 1 || missing[0] != "c" {
-		t.Errorf("missing = %v; want [c]", missing)
-	}
+	s.Len(found, 2)
+	s.Equal(1, found["a"])
+	s.Equal(2, found["b"])
+	s.Equal([]string{"c"}, missing)
 }
 
-func TestGetManyWithStore(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestGetManyWithStore() {
 	store := newMockStore[string, int]()
 	store.data["c"] = 3
 	store.data["d"] = 4
 
 	c := New[string, int](WithStore(store))
-	c.Set(ctx, "a", 1)
+	c.Set(s.ctx, "a", 1)
 
-	found, missing, err := c.GetMany(ctx, []string{"a", "c", "e"})
-	if err != nil {
-		t.Fatalf("GetMany error: %v", err)
-	}
+	found, missing, err := c.GetMany(s.ctx, []string{"a", "c", "e"})
+	s.Require().NoError(err)
 
-	if len(found) != 2 {
-		t.Errorf("found = %d; want 2", len(found))
-	}
-	if found["a"] != 1 || found["c"] != 3 {
-		t.Errorf("found = %v; want a:1, c:3", found)
-	}
-	if len(missing) != 1 || missing[0] != "e" {
-		t.Errorf("missing = %v; want [e]", missing)
-	}
+	s.Len(found, 2)
+	s.Equal(1, found["a"])
+	s.Equal(3, found["c"])
+	s.Equal([]string{"e"}, missing)
 }
 
-func TestSetMany(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestSetMany() {
 	c := New[string, int]()
 
-	err := c.SetMany(ctx, map[string]int{"a": 1, "b": 2, "c": 3})
-	if err != nil {
-		t.Fatalf("SetMany error: %v", err)
-	}
+	err := c.SetMany(s.ctx, map[string]int{"a": 1, "b": 2, "c": 3})
+	s.Require().NoError(err)
 
-	if c.Len() != 3 {
-		t.Errorf("Len() = %d; want 3", c.Len())
-	}
+	s.Equal(3, c.Len())
 
-	v, ok, _ := c.Get(ctx, "b")
-	if !ok || v != 2 {
-		t.Errorf("Get(b) = %d, %v; want 2, true", v, ok)
-	}
+	v, ok, err := c.Get(s.ctx, "b")
+	s.Require().NoError(err)
+	s.True(ok)
+	s.Equal(2, v)
 }
 
-func TestSetManyWithStore(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestSetManyWithStore() {
 	store := newMockStore[string, int]()
 	c := New[string, int](WithStore(store))
 
-	err := c.SetMany(ctx, map[string]int{"a": 1, "b": 2})
-	if err != nil {
-		t.Fatalf("SetMany error: %v", err)
-	}
+	err := c.SetMany(s.ctx, map[string]int{"a": 1, "b": 2})
+	s.Require().NoError(err)
 
-	if store.data["a"] != 1 || store.data["b"] != 2 {
-		t.Errorf("store = %v; want a:1, b:2", store.data)
-	}
+	s.Equal(1, store.data["a"])
+	s.Equal(2, store.data["b"])
 }
 
-func TestDeleteMany(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestDeleteMany() {
 	c := New[string, int]()
 
-	c.Set(ctx, "a", 1)
-	c.Set(ctx, "b", 2)
-	c.Set(ctx, "c", 3)
+	c.Set(s.ctx, "a", 1)
+	c.Set(s.ctx, "b", 2)
+	c.Set(s.ctx, "c", 3)
 
-	err := c.DeleteMany(ctx, []string{"a", "c"})
-	if err != nil {
-		t.Fatalf("DeleteMany error: %v", err)
-	}
+	err := c.DeleteMany(s.ctx, []string{"a", "c"})
+	s.Require().NoError(err)
 
-	if c.Has("a") || c.Has("c") {
-		t.Error("a and c should be deleted")
-	}
-	if !c.Has("b") {
-		t.Error("b should still exist")
-	}
+	s.False(c.Has("a"))
+	s.False(c.Has("c"))
+	s.True(c.Has("b"))
 }
 
-func TestDeleteManyWithStore(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestDeleteManyWithStore() {
 	store := newMockStore[string, int]()
 	store.data["a"] = 1
 	store.data["b"] = 2
 
 	c := New[string, int](WithStore(store))
-	c.Set(ctx, "a", 1)
-	c.Set(ctx, "b", 2)
+	c.Set(s.ctx, "a", 1)
+	c.Set(s.ctx, "b", 2)
 
-	err := c.DeleteMany(ctx, []string{"a"})
-	if err != nil {
-		t.Fatalf("DeleteMany error: %v", err)
-	}
+	err := c.DeleteMany(s.ctx, []string{"a"})
+	s.Require().NoError(err)
 
-	if _, ok := store.data["a"]; ok {
-		t.Error("a should be deleted from store")
-	}
-	if _, ok := store.data["b"]; !ok {
-		t.Error("b should still exist in store")
-	}
+	_, ok := store.data["a"]
+	s.False(ok, "a should be deleted from store")
+
+	_, ok = store.data["b"]
+	s.True(ok, "b should still exist in store")
 }
 
-func TestGetOrLoadWithPerCallLoader(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestGetOrLoadWithPerCallLoader() {
 	defaultLoaded := 0
 	perCallLoaded := 0
 
@@ -1037,97 +847,67 @@ func TestGetOrLoadWithPerCallLoader(t *testing.T) {
 	)
 
 	// use per-call loader
-	v, err := c.GetOrLoad(ctx, "a", func(_ context.Context, key string) (int, error) {
+	v, err := c.GetOrLoad(s.ctx, "a", func(_ context.Context, key string) (int, error) {
 		perCallLoaded++
 		return 99, nil
 	})
-	if err != nil {
-		t.Fatalf("GetOrLoad error: %v", err)
-	}
-	if v != 99 {
-		t.Errorf("GetOrLoad = %d; want 99", v)
-	}
-	if perCallLoaded != 1 {
-		t.Errorf("perCallLoaded = %d; want 1", perCallLoaded)
-	}
-	if defaultLoaded != 0 {
-		t.Errorf("defaultLoaded = %d; want 0", defaultLoaded)
-	}
+	s.Require().NoError(err)
+	s.Equal(99, v)
+	s.Equal(1, perCallLoaded)
+	s.Equal(0, defaultLoaded)
 }
 
-func TestGetManyOrLoad(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestGetManyOrLoad() {
 	c := New[string, int]()
 
-	c.Set(ctx, "a", 1)
+	c.Set(s.ctx, "a", 1)
 
-	result, err := c.GetManyOrLoad(ctx, []string{"a", "b", "c"}, func(_ context.Context, keys []string) (map[string]int, error) {
+	result, err := c.GetManyOrLoad(s.ctx, []string{"a", "b", "c"}, func(_ context.Context, keys []string) (map[string]int, error) {
 		loaded := make(map[string]int)
 		for _, k := range keys {
 			loaded[k] = len(k) * 10
 		}
 		return loaded, nil
 	})
-	if err != nil {
-		t.Fatalf("GetManyOrLoad error: %v", err)
-	}
+	s.Require().NoError(err)
 
-	if result["a"] != 1 {
-		t.Errorf("result[a] = %d; want 1 (cached)", result["a"])
-	}
-	if result["b"] != 10 {
-		t.Errorf("result[b] = %d; want 10 (loaded)", result["b"])
-	}
-	if result["c"] != 10 {
-		t.Errorf("result[c] = %d; want 10 (loaded)", result["c"])
-	}
+	s.Equal(1, result["a"], "cached value")
+	s.Equal(10, result["b"], "loaded value")
+	s.Equal(10, result["c"], "loaded value")
 }
 
-func TestGetManyOrLoadNilLoader(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestGetManyOrLoadNilLoader() {
 	c := New[string, int]()
 
-	c.Set(ctx, "a", 1)
+	c.Set(s.ctx, "a", 1)
 
-	result, err := c.GetManyOrLoad(ctx, []string{"a", "b"}, nil)
-	if err != nil {
-		t.Fatalf("GetManyOrLoad error: %v", err)
-	}
+	result, err := c.GetManyOrLoad(s.ctx, []string{"a", "b"}, nil)
+	s.Require().NoError(err)
 
-	if result["a"] != 1 {
-		t.Errorf("result[a] = %d; want 1", result["a"])
-	}
-	if _, ok := result["b"]; ok {
-		t.Error("b should not be in result without loader")
-	}
+	s.Equal(1, result["a"])
+	_, ok := result["b"]
+	s.False(ok, "b should not be in result without loader")
 }
 
-func TestGetManyOrLoadAllCached(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestGetManyOrLoadAllCached() {
 	c := New[string, int]()
 
-	c.Set(ctx, "a", 1)
-	c.Set(ctx, "b", 2)
+	c.Set(s.ctx, "a", 1)
+	c.Set(s.ctx, "b", 2)
 
 	loaderCalled := false
-	result, err := c.GetManyOrLoad(ctx, []string{"a", "b"}, func(_ context.Context, keys []string) (map[string]int, error) {
+	result, err := c.GetManyOrLoad(s.ctx, []string{"a", "b"}, func(_ context.Context, keys []string) (map[string]int, error) {
 		loaderCalled = true
 		return nil, nil
 	})
-	if err != nil {
-		t.Fatalf("GetManyOrLoad error: %v", err)
-	}
+	s.Require().NoError(err)
 
-	if loaderCalled {
-		t.Error("loader should not be called when all keys are cached")
-	}
-	if result["a"] != 1 || result["b"] != 2 {
-		t.Errorf("result = %v; want a:1, b:2", result)
-	}
+	s.False(loaderCalled, "loader should not be called when all keys are cached")
+	s.Equal(1, result["a"])
+	s.Equal(2, result["b"])
 }
 
-func TestStoreErrorHandler(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestStoreErrorHandler() {
 	handlerCalled := false
 
 	c := New[string, int](
@@ -1138,17 +918,12 @@ func TestStoreErrorHandler(t *testing.T) {
 		}),
 	)
 
-	_, _, err := c.Get(ctx, "key")
-	if err != nil {
-		t.Error("error should be swallowed by handler")
-	}
-	if !handlerCalled {
-		t.Error("handler should be called")
-	}
+	_, _, err := c.Get(s.ctx, "key")
+	s.NoError(err, "error should be swallowed by handler")
+	s.True(handlerCalled)
 }
 
-func TestStoreErrorHandlerPropagate(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestStoreErrorHandlerPropagate() {
 	customErr := errors.New("custom error")
 
 	c := New[string, int](
@@ -1158,51 +933,37 @@ func TestStoreErrorHandlerPropagate(t *testing.T) {
 		}),
 	)
 
-	_, _, err := c.Get(ctx, "key")
-	if !errors.Is(err, customErr) {
-		t.Errorf("error = %v; want %v", err, customErr)
-	}
+	_, _, err := c.Get(s.ctx, "key")
+	s.Require().ErrorIs(err, customErr)
 }
 
-func TestGetManyStoreError(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestGetManyStoreError() {
 	c := New[string, int](WithStore[string, int](&errorStore[string, int]{}))
 
-	_, _, err := c.GetMany(ctx, []string{"a", "b"})
-	if err == nil {
-		t.Error("GetMany with store error should return error")
-	}
+	_, _, err := c.GetMany(s.ctx, []string{"a", "b"})
+	s.Error(err)
 }
 
-func TestSetManyStoreError(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestSetManyStoreError() {
 	c := New[string, int](WithStore[string, int](&errorStore[string, int]{}))
 
-	err := c.SetMany(ctx, map[string]int{"a": 1})
-	if err == nil {
-		t.Error("SetMany with store error should return error")
-	}
+	err := c.SetMany(s.ctx, map[string]int{"a": 1})
+	s.Error(err)
 }
 
-func TestDeleteManyStoreError(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestDeleteManyStoreError() {
 	c := New[string, int](WithStore[string, int](&errorStore[string, int]{}))
 
-	err := c.DeleteMany(ctx, []string{"a"})
-	if err == nil {
-		t.Error("DeleteMany with store error should return error")
-	}
+	err := c.DeleteMany(s.ctx, []string{"a"})
+	s.Error(err)
 }
 
-func TestGetManyOrLoadError(t *testing.T) {
-	ctx := context.Background()
+func (s *StashSuite) TestGetManyOrLoadError() {
 	c := New[string, int]()
 	loaderErr := errors.New("loader failed")
 
-	_, err := c.GetManyOrLoad(ctx, []string{"a"}, func(_ context.Context, _ []string) (map[string]int, error) {
+	_, err := c.GetManyOrLoad(s.ctx, []string{"a"}, func(_ context.Context, _ []string) (map[string]int, error) {
 		return nil, loaderErr
 	})
-	if !errors.Is(err, loaderErr) {
-		t.Errorf("error = %v; want %v", err, loaderErr)
-	}
+	s.Require().ErrorIs(err, loaderErr)
 }
