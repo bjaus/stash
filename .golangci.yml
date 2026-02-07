@@ -7,6 +7,14 @@ linters:
   default: standard
   disable:
     - depguard
+  exclusions:
+    rules:
+      - linters: [errcheck]
+        path: _test\.go
+      - linters: [errcheck]
+        path: example_test\.go
+      - linters: [unused]
+        path: policy\.go
 
 formatters:
   enable:

@@ -22,6 +22,13 @@ type evictor[K comparable] interface {
 	remove(key K)
 }
 
+// Compile-time interface assertions.
+var (
+	_ evictor[string] = (*lruEvictor[string])(nil)
+	_ evictor[string] = (*lfuEvictor[string])(nil)
+	_ evictor[string] = (*fifoEvictor[string])(nil)
+)
+
 // lruEvictor implements LRU eviction using a doubly-linked list.
 type lruEvictor[K comparable] struct {
 	order *list.List
